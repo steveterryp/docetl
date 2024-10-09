@@ -1,20 +1,22 @@
+from collections import defaultdict
 import json
 import os
 import time
 from typing import Dict, List, Optional, Tuple
 
 from dotenv import load_dotenv
+import hashlib
 from rich.console import Console
 
 from docetl.dataset import Dataset, create_parsing_tool_map
 from docetl.operations import get_operation
 from docetl.operations.utils import flush_cache
-from docetl.utils import load_config
+from docetl.config_wrapper import ConfigWrapper
 
 load_dotenv()
 
 
-class DSLRunner:
+class DSLRunner(ConfigWrapper):
     """
     A class for executing Domain-Specific Language (DSL) configurations.
 
@@ -37,15 +39,11 @@ class DSLRunner:
         Args:
             max_threads (int, optional): Maximum number of threads to use. Defaults to None.
         """
-        self.config = config
-        self.default_model = self.config.get("default_model", "gpt-4o-mini")
-        self.max_threads = max_threads or (os.cpu_count() or 1) * 4
-        self.console = Console()
-        self.status = None
+        ConfigWrapper.__init__(self, config, max_threads)
         self.datasets = {}
 
-        self.intermediate_dir = self.config["pipeline"]["output"].get(
-            "intermediate_dir"
+        self.intermediate_dir = (
+            self.config.get("pipeline", {}).get("output", {}).get("intermediate_dir")
         )
 
         # Create parsing tool map
@@ -67,10 +65,22 @@ class DSLRunner:
 
         self.syntax_check()
 
-    @classmethod
-    def from_yaml(cls, yaml_file: str, **kwargs):
-        config = load_config(yaml_file)
-        return cls(config, **kwargs)
+        op_map = {op["name"]: op for op in self.config["operations"]}
+
+        # Hash each pipeline step/operation
+        # for each step op, hash the code of each op up until and (including that op)
+        self.step_op_hashes = defaultdict(dict)
+        for step in self.config["pipeline"]["steps"]:
+            for idx, op in enumerate(step["operations"]):
+                op_name = op if isinstance(op, str) else list(op.keys())[0]
+
+                all_ops_until_and_including_current = [
+                    op_map[prev_op] for prev_op in step["operations"][:idx]
+                ] + [op_map[op_name]]
+                all_ops_str = json.dumps(all_ops_until_and_including_current)
+                self.step_op_hashes[step["name"]][op_name] = hashlib.sha256(
+                    all_ops_str.encode()
+                ).hexdigest()
 
     def syntax_check(self):
         """
@@ -94,6 +104,7 @@ class DSLRunner:
             try:
                 operation_class = get_operation(operation_type)
                 operation_class(
+                    self,
                     operation_config,
                     self.default_model,
                     self.max_threads,
@@ -132,7 +143,7 @@ class DSLRunner:
                 self.datasets[step["input"]].load() if "input" in step else None
             )
             output_data, step_cost = self.execute_step(step, input_data)
-            self.datasets[step_name] = Dataset("memory", output_data)
+            self.datasets[step_name] = Dataset(self, "memory", output_data)
             flush_cache(self.console)
             total_cost += step_cost
             self.console.log(
@@ -142,6 +153,15 @@ class DSLRunner:
         self.save_output(
             self.datasets[self.config["pipeline"]["steps"][-1]["name"]].load()
         )
+
+        # Save the self.step_op_hashes to a file if self.intermediate_dir exists
+        if self.intermediate_dir:
+            with open(
+                os.path.join(self.intermediate_dir, ".docetl_intermediate_config.json"),
+                "w",
+            ) as f:
+                json.dump(self.step_op_hashes, f)
+
         self.console.rule("[bold green]Execution Summary[/bold green]")
         self.console.print(f"[bold green]Total cost: [green]${total_cost:.2f}[/green]")
         self.console.print(
@@ -163,6 +183,7 @@ class DSLRunner:
         for name, dataset_config in self.config["datasets"].items():
             if dataset_config["type"] == "file":
                 self.datasets[name] = Dataset(
+                    self,
                     "file",
                     dataset_config["path"],
                     source="local",
@@ -245,6 +266,7 @@ class DSLRunner:
 
                 operation_class = get_operation(op_object["type"])
                 operation_instance = operation_class(
+                    self,
                     op_object,
                     self.default_model,
                     self.max_threads,
@@ -274,6 +296,22 @@ class DSLRunner:
         if self.intermediate_dir is None:
             return None
 
+        intermediate_config_path = os.path.join(
+            self.intermediate_dir, ".docetl_intermediate_config.json"
+        )
+        if not os.path.exists(intermediate_config_path):
+            return None
+
+        # See if the checkpoint config is the same as the current step op hash
+        with open(intermediate_config_path, "r") as f:
+            intermediate_config = json.load(f)
+
+        if (
+            intermediate_config.get(step_name, {}).get(operation_name, "")
+            != self.step_op_hashes[step_name][operation_name]
+        ):
+            return None
+
         checkpoint_path = os.path.join(
             self.intermediate_dir, step_name, f"{operation_name}.json"
         )
@@ -281,7 +319,7 @@ class DSLRunner:
         if os.path.exists(checkpoint_path):
             if f"{step_name}_{operation_name}" not in self.datasets:
                 self.datasets[f"{step_name}_{operation_name}"] = Dataset(
-                    "file", checkpoint_path, "local"
+                    self, "file", checkpoint_path, "local"
                 )
             return self.datasets[f"{step_name}_{operation_name}"].load()
         return None
@@ -309,6 +347,7 @@ class DSLRunner:
         os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
         with open(checkpoint_path, "w") as f:
             json.dump(data, f)
+
         self.console.print(
             f"[green]✓ [italic]Intermediate saved for operation '{operation_name}' in step '{step_name}' at {checkpoint_path}[/italic][/green]"
         )

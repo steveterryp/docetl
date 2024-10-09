@@ -27,22 +27,45 @@ In this example, you've specified paths to Excel files. DocETL will use these pa
 
 ## Custom Parsing in Action
 
-### 1. Configuration
+#### 1. Configuration
 
 To use custom parsing, you need to define parsing tools in your DocETL configuration file. Here's an example:
 
 ```yaml
 parsing_tools:
-  - name: ocr_parser
+  - name: top_products_report
     function_code: |
-      import pytesseract
-      from pdf2image import convert_from_path
-      def ocr_parser(filename: str) -> List[str]:
-          images = convert_from_path(filename)
-          text = ""
-          for image in images:
-              text += pytesseract.image_to_string(image)
-          return [text]
+      def top_products_report(document: Dict) -> List[Dict]:
+          import pandas as pd
+          
+          # Read the Excel file
+          filename = document["excel_path"]
+          df = pd.read_excel(filename)
+          
+          # Calculate total sales
+          total_sales = df['Sales'].sum()
+          
+          # Find top 500 products by sales
+          top_products = df.groupby('Product')['Sales'].sum().nlargest(500)
+          
+          # Calculate month-over-month growth
+          df['Date'] = pd.to_datetime(df['Date'])
+          monthly_sales = df.groupby(df['Date'].dt.to_period('M'))['Sales'].sum()
+          mom_growth = monthly_sales.pct_change().fillna(0)
+          
+          # Prepare the analysis report
+          report = [
+              f"Total Sales: ${total_sales:,.2f}",
+              "\nTop 500 Products by Sales:",
+              top_products.to_string(),
+              "\nMonth-over-Month Growth:",
+              mom_growth.to_string()
+          ]
+          
+          # Return a list of dicts representing the output
+          # The input document will be merged into each output doc,
+          # so we can access all original fields from the input doc.
+          return [{"sales_analysis": "\n".join(report)}]
 
 datasets:
   sales_reports:
@@ -50,11 +73,7 @@ datasets:
     source: local
     path: "sales_data/sales_paths.json"
     parsing:
-      - input_key: excel_path
-        function: xlsx_to_string
-        output_key: sales_data
-        function_kwargs:
-          orientation: "col"
+      - function: top_products_report
 
   receipts:
     type: file
@@ -62,17 +81,19 @@ datasets:
     path: "receipts/receipt_paths.json"
     parsing:
       - input_key: pdf_path
-        function: ocr_parser
+        function: paddleocr_pdf_to_string
         output_key: receipt_text
+        ocr_enabled: true
+        lang: "en"
 ```
 
 In this configuration:
 
-- We define a custom `ocr_parser` for PDF files.
-- We use the built-in `xlsx_to_string` parser for Excel files.
+- We define a custom `top_products_report` function for Excel files.
+- We use the built-in `paddleocr_pdf_to_string` parser for PDF files.
 - We apply these parsing tools to the external files referenced in the respective datasets.
 
-### 2. Pipeline Integration
+#### 2. Pipeline Integration
 
 Once you've defined your parsing tools and datasets, you can use the processed data in your pipeline:
 
@@ -91,50 +112,7 @@ pipeline:
 
 This pipeline will use the parsed data from both Excel files and PDFs for further processing.
 
-## Built-in Parsing Tools
-
-DocETL provides several built-in parsing tools to handle common file formats and data processing tasks. These can be used directly in your configuration by specifying their names in the `function` field of your parsing configuration.
-
-[Insert the existing documentation for built-in parsing tools here]
-
-## Creating Custom Parsing Tools
-
-If the built-in tools don't meet your needs, you can create your own custom parsing tools. Here's how:
-
-1. Define your parsing function in the `parsing_tools` section of your configuration.
-2. Ensure your function takes a filename as input and returns a list of strings.
-3. Use your custom parser in the `parsing` section of your dataset configuration.
-
-For example:
-
-```yaml
-parsing_tools:
-  - name: my_custom_parser
-    function_code: |
-      def my_custom_parser(filename: str) -> List[str]:
-          # Your custom parsing logic here
-          return [processed_data]
-
-datasets:
-  my_dataset:
-    type: file
-    source: local
-    path: "data/paths.json"
-    parsing:
-      - input_key: file_path
-        function: my_custom_parser
-        output_key: processed_data
-```
-
-### Understanding the Parsing Tools
-
-In this example, we used two parsing tools:
-
-1. **xlsx_to_string**: A built-in parsing tool provided by DocETL. It reads Excel files and converts them to a string representation.
-
-2. **ocr_parser**: A custom parsing tool we defined for OCR processing of PDF files. _Note that it returns a list containing a single string, which is the format expected by DocETL for parsing tools._
-
-## How Data Gets Parsed and Formatted
+### How Data Gets Parsed and Formatted
 
 When you run your DocETL pipeline, the parsing tools you've specified in your configuration file are applied to the external files referenced in your dataset JSONs. Here's what happens:
 
@@ -145,53 +123,60 @@ When you run your DocETL pipeline, the parsing tools you've specified in your co
 
 Let's look at how this works for our earlier examples:
 
-### Excel Files (using xlsx_to_string)
+#### Excel Files (using top_products_report)
 
 For an Excel file like "sales_data/january_sales.xlsx":
 
-1. The `xlsx_to_string` function reads the Excel file.
-2. It converts the data to a string representation.
-3. The output might look like this:
+- The top_products_report function reads the Excel file.
+- It processes the sales data and generates a report of top-selling products.
+- The output might look like this:
 
-```
-Date:
-2023-01-01
-2023-01-02
-...
+```markdown
+Top Products Report - January 2023
 
-Product:
-Widget A
-Widget B
-...
+1. Widget A - 1500 units sold
+2. Gadget B - 1200 units sold
+3. Gizmo C - 950 units sold
+4. Doohickey D - 800 units sold
+5. Thingamajig E - 650 units sold
+   ...
 
-Amount:
-100
-150
-...
+Total Revenue: $245,000
+Best Selling Category: Electronics
 ```
 
-### PDF Files (using ocr_parser)
+#### PDF Files (using paddleocr_pdf_to_string)
 
 For a PDF file like "receipts/receipt001.pdf":
 
-1. The `ocr_parser` function converts each page of the PDF to an image.
-2. It applies OCR to each image.
-3. The function combines the text from all pages.
-4. The output might look like this:
+- The paddleocr_pdf_to_string function reads the PDF file.
+- It uses PaddleOCR to perform optical character recognition on each page.
+- The function combines the extracted text from all pages into a single string.
+  The output might look like this:
 
-```
+```markdown
 RECEIPT
 Store: Example Store
 Date: 2023-05-15
 Items:
+
 1. Product A - $10.99
 2. Product B - $15.50
-Total: $26.49
+3. Product C - $7.25
+4. Product D - $22.00
+   Subtotal: $55.74
+   Tax (8%): $4.46
+   Total: $60.20
+
+Payment Method: Credit Card
+Card Number: \***\* \*\*** \*\*\*\* 1234
+
+Thank you for your purchase!
 ```
 
 This parsed and formatted data is then passed to the respective operations in your pipeline for further processing.
 
-## Running the Pipeline
+### Running the Pipeline
 
 Once you've set up your pipeline configuration file with the appropriate parsing tools and dataset definitions, you can run your DocETL pipeline. Here's how:
 
@@ -219,41 +204,45 @@ When you run this command:
 DocETL provides several built-in parsing tools to handle common file formats and data processing tasks. These tools can be used directly in your configuration by specifying their names in the `function` field of your parsing tools configuration. Here's an overview of the available built-in parsing tools:
 
 ::: docetl.parsing_tools.xlsx_to_string
-    options:
-        show_root_heading: true
-        heading_level: 3
+  options:
+    show_root_heading: true
+    heading_level: 3
 
 ::: docetl.parsing_tools.txt_to_string
-    options:
-        show_root_heading: true
-        heading_level: 3
+  options:
+    show_root_heading: true
+    heading_level: 3
 
 ::: docetl.parsing_tools.docx_to_string
-    options:
-        show_root_heading: true
-        heading_level: 3
+  options:
+    show_root_heading: true
+    heading_level: 3
 
 ::: docetl.parsing_tools.whisper_speech_to_text
-    options:
-        show_root_heading: true
-        heading_level: 3
+  options:
+    show_root_heading: true
+    heading_level: 3
 
 ::: docetl.parsing_tools.pptx_to_string
-    options:
-        show_root_heading: true
-        heading_level: 3
-        
+  options:
+    show_root_heading: true
+    heading_level: 3
 
 ::: docetl.parsing_tools.azure_di_read
-    options:
-        heading_level: 3
-        show_root_heading: true
+  options:
+    heading_level: 3
+    show_root_heading: true
+
+::: docetl.parsing_tools.paddleocr_pdf_to_string
+  options:
+    heading_level: 3
+    show_root_heading: true
 
 ### Using Function Arguments with Parsing Tools
 
-When using parsing tools in your DocETL configuration, you can pass additional arguments to the parsing functions using the function_kwargs field. This allows you to customize the behavior of the parsing tools without modifying their implementation.
+When using parsing tools in your DocETL configuration, you can pass additional arguments to the parsing functions.
 
-For example, when using the xlsx_to_string parsing tool, you can specify options like the orientation of the data, the order of columns, or whether to process each sheet separately. Here's an example of how to use function_kwargs in your configuration:
+For example, when using the xlsx_to_string parsing tool, you can specify options like the orientation of the data, the order of columns, or whether to process each sheet separately. Here's an example of how to use such kwargs in your configuration:
 
 ```yaml
 datasets:
@@ -264,10 +253,9 @@ datasets:
     parsing_tools:
       - name: excel_parser
         function: xlsx_to_string
-        function_kwargs:
-          orientation: row
-          col_order: ["Date", "Product", "Quantity", "Price"]
-          doc_per_sheet: true
+        orientation: row
+        col_order: ["Date", "Product", "Quantity", "Price"]
+        doc_per_sheet: true
 ```
 
 ## Contributing Built-in Parsing Tools
@@ -289,3 +277,30 @@ While DocETL provides several built-in parsing tools, the community can always b
     - Include comprehensive docstrings explaining the function's purpose, parameters, and return value. The return value should be a list of strings.
     - Handle potential errors gracefully and provide informative error messages.
     - If your parser requires additional dependencies, make sure to mention them in the pull request.
+
+## Creating Custom Parsing Tools
+
+If the built-in tools don't meet your needs, you can create your own custom parsing tools. Here's how:
+
+1. Define your parsing function in the `parsing_tools` section of your configuration.
+2. Ensure your function takes a document (dict) as input and returns a list of documents (dicts).
+3. Use your custom parser in the `parsing` section of your dataset configuration.
+
+For example:
+
+```yaml
+parsing_tools:
+  - name: my_custom_parser
+    function_code: |
+      def my_custom_parser(document: Dict) -> List[Dict]:
+          # Your custom parsing logic here
+          return [processed_data]
+
+datasets:
+  my_dataset:
+    type: file
+    source: local
+    path: "data/paths.json"
+    parsing:
+      - function: my_custom_parser
+```

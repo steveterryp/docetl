@@ -11,7 +11,7 @@ Some common scenarios where the Split operation is valuable include:
 - Breaking down large legal documents to extract relevant clauses or sections
 - Preparing long-form content for summarization or topic extraction
 
-## 🚀 Example: Splitting Customer Support Transcripts
+## 🚀 Operation Example: Splitting Customer Support Transcripts
 
 Here's an example of using the Split operation to divide customer support transcripts into manageable chunks:
 
@@ -42,7 +42,7 @@ Note that chunks will not overlap in content.
 - `method`: The method to use for splitting. Options are "delimiter" and "token_count".
 - `method_kwargs`: A dictionary of keyword arguments for the splitting method.
   - For "delimiter" method: `delimiter` (string) to use for splitting.
-  - For "token_count" method: `token_count` (integer) specifying the maximum number of tokens per chunk.
+  - For "token_count" method: `num_tokens` (integer) specifying the maximum number of tokens per chunk.
 
 ### Optional Parameters in `method_kwargs
 
@@ -95,7 +95,7 @@ The Split operation generates multiple output items for each input item:
 3. **Topic Extraction from Research Papers**:
    Divide research papers into sections, use a map operation to extract key topics from each section, then apply a reduce operation to synthesize main themes across the entire paper.
 
-## Example: Analyzing Customer Frustration
+## 🚀 End-to-End Pipeline Example: Analyzing Customer Frustration
 
 Let's walk through a complete example of using Split, Map, and Reduce operations to analyze customer frustration in support transcripts.
 
@@ -107,8 +107,8 @@ Let's walk through a complete example of using Split, Map, and Reduce operations
   split_key: transcript
   method: token_count
   method_kwargs:
-    token_count: 500
-  model: gpt-4o-mini
+    num_tokens: 500
+    model: gpt-4o-mini
 ```
 
 ### Step 2: Map Operation (Identify Frustration Indicators)

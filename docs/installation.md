@@ -33,7 +33,7 @@ To install DocETL from source, follow these steps:
 1. Clone the repository:
 
 ```bash
-git clone https://github.com/shreyashankar/docetl.git
+git clone https://github.com/ucbepic/docetl.git
 cd docetl
 ```
 
@@ -47,6 +47,12 @@ pip install poetry
 
 ```bash
 poetry install
+```
+
+If you want to use the parsing tools, you need to install the `parsing` extra:
+
+```bash
+poetry install --extras "parsing"
 ```
 
 This will create a virtual environment and install all the required dependencies.

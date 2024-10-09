@@ -30,6 +30,8 @@ DocETL uses [LiteLLM](https://github.com/BerriAI/litellm) under the hood, which 
 
     If you choose to use a different provider, be aware that you may encounter unexpected behavior or reduced functionality, especially with operations that depend on structured outputs. We use tool calling to extract structured outputs from the LLM's response, so make sure your provider supports tool calling.
 
+    If using a Gemini model, you can use the `gemini` prefix for the model name. For example, `gemini/gemini-1.5-flash-002`. (This has worked pretty well for us so far, and is so cheap!)
+
     If using Ollama (e.g., llama 3.2), make sure your output schemas are not too complex, since these models are not as good as OpenAI for structured outputs! For example, use [parallel map operations](operators/parallel-map.md) to reduce the number of output attributes per prompt.
 
 ## Preparing the Data
@@ -122,7 +124,7 @@ Create a file named `pipeline.yaml` with the following structure:
         prompt: |
           Here are some transcripts of conversations between a doctor and a patient:
 
-          {% for value in values %}
+          {% for value in inputs %}
           Transcript {{ loop.index }}:
           {{ value.src }}
           {% endfor %}

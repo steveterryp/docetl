@@ -23,14 +23,7 @@ from docetl.operations.clustering_utils import (
     cluster_documents,
     get_embeddings_for_clustering,
 )
-from docetl.operations.utils import (
-    call_llm,
-    call_llm_with_gleaning,
-    gen_embedding,
-    parse_llm_response,
-    rich_as_completed,
-    validate_output,
-)
+from docetl.operations.utils import rich_as_completed
 from docetl.utils import completion_cost
 
 
@@ -91,17 +84,23 @@ class ReduceOperation(BaseOperation):
         for key in required_keys:
             if key not in self.config:
                 raise ValueError(
-                    f"Missing required key '{key}' in ReduceOperation configuration"
+                    f"Missing required key '{key}' in {self.config['name']} configuration"
                 )
 
         if "schema" not in self.config["output"]:
-            raise ValueError("Missing 'schema' in 'output' configuration")
+            raise ValueError(
+                f"Missing 'schema' in {self.config['name']} 'output' configuration"
+            )
 
         if not isinstance(self.config["output"]["schema"], dict):
-            raise TypeError("'schema' in 'output' configuration must be a dictionary")
+            raise TypeError(
+                f"'schema' in {self.config['name']} 'output' configuration must be a dictionary"
+            )
 
         if not self.config["output"]["schema"]:
-            raise ValueError("'schema' in 'output' configuration cannot be empty")
+            raise ValueError(
+                f"'schema' in {self.config['name']} 'output' configuration cannot be empty"
+            )
 
         # Check if the prompt is a valid Jinja2 template
         try:
@@ -111,21 +110,25 @@ class ReduceOperation(BaseOperation):
             )
             template_var_names = {var.name for var in template_vars}
             if "inputs" not in template_var_names:
-                raise ValueError("Template must include the 'inputs' variable")
+                raise ValueError(
+                    f"Prompt template for {self.config['name']} must include the 'inputs' variable"
+                )
         except Exception as e:
-            raise ValueError(f"Invalid Jinja2 template in 'prompt': {str(e)}")
+            raise ValueError(
+                f"Invalid Jinja2 template in {self.config['name']} 'prompt': {str(e)}"
+            )
 
         # Check if fold_prompt is a valid Jinja2 template (now required if merge exists)
         if "merge_prompt" in self.config:
             if "fold_prompt" not in self.config:
                 raise ValueError(
-                    "'fold_prompt' is required when 'merge_prompt' is specified"
+                    f"'fold_prompt' is required when 'merge_prompt' is specified in {self.config['name']}"
                 )
 
         if "fold_prompt" in self.config:
             if "fold_batch_size" not in self.config:
                 raise ValueError(
-                    "'fold_batch_size' is required when 'fold_prompt' is specified"
+                    f"'fold_batch_size' is required when 'fold_prompt' is specified in {self.config['name']}"
                 )
 
             try:
@@ -137,16 +140,18 @@ class ReduceOperation(BaseOperation):
                 required_vars = {"inputs", "output"}
                 if not required_vars.issubset(fold_template_var_names):
                     raise ValueError(
-                        f"Fold template must include variables: {required_vars}. Current template includes: {fold_template_var_names}"
+                        f"Fold template in {self.config['name']} must include variables: {required_vars}. Current template includes: {fold_template_var_names}"
                     )
             except Exception as e:
-                raise ValueError(f"Invalid Jinja2 template in 'fold_prompt': {str(e)}")
+                raise ValueError(
+                    f"Invalid Jinja2 template in {self.config['name']} 'fold_prompt': {str(e)}"
+                )
 
         # Check merge_prompt and merge_batch_size
         if "merge_prompt" in self.config:
             if "merge_batch_size" not in self.config:
                 raise ValueError(
-                    "'merge_batch_size' is required when 'merge_prompt' is specified"
+                    f"'merge_batch_size' is required when 'merge_prompt' is specified in {self.config['name']}"
                 )
 
             try:
@@ -157,63 +162,81 @@ class ReduceOperation(BaseOperation):
                 merge_template_var_names = {var.name for var in merge_template_vars}
                 if "outputs" not in merge_template_var_names:
                     raise ValueError(
-                        "Merge template must include the 'outputs' variable"
+                        f"Merge template in {self.config['name']} must include the 'outputs' variable"
                     )
             except Exception as e:
-                raise ValueError(f"Invalid Jinja2 template in 'merge_prompt': {str(e)}")
+                raise ValueError(
+                    f"Invalid Jinja2 template in {self.config['name']} 'merge_prompt': {str(e)}"
+                )
 
         # Check if the model is specified (optional)
         if "model" in self.config and not isinstance(self.config["model"], str):
-            raise TypeError("'model' in configuration must be a string")
+            raise TypeError(
+                f"'model' in {self.config['name']} configuration must be a string"
+            )
 
         # Check if reduce_key is a string or a list of strings
         if not isinstance(self.config["reduce_key"], (str, list)):
-            raise TypeError("'reduce_key' must be a string or a list of strings")
+            raise TypeError(
+                f"'reduce_key' in {self.config['name']} configuration must be a string or a list of strings"
+            )
         if isinstance(self.config["reduce_key"], list):
             if not all(isinstance(key, str) for key in self.config["reduce_key"]):
-                raise TypeError("All elements in 'reduce_key' list must be strings")
+                raise TypeError(
+                    f"All elements in 'reduce_key' list in {self.config['name']} configuration must be strings"
+                )
 
         # Check if input schema is provided and valid (optional)
         if "input" in self.config:
             if "schema" not in self.config["input"]:
-                raise ValueError("Missing 'schema' in 'input' configuration")
+                raise ValueError(
+                    f"Missing 'schema' in {self.config['name']} 'input' configuration"
+                )
             if not isinstance(self.config["input"]["schema"], dict):
                 raise TypeError(
-                    "'schema' in 'input' configuration must be a dictionary"
+                    f"'schema' in {self.config['name']} 'input' configuration must be a dictionary"
                 )
 
         # Check if fold_batch_size and merge_batch_size are positive integers
         for key in ["fold_batch_size", "merge_batch_size"]:
             if key in self.config:
                 if not isinstance(self.config[key], int) or self.config[key] <= 0:
-                    raise ValueError(f"'{key}' must be a positive integer")
+                    raise ValueError(
+                        f"'{key}' in {self.config['name']} configuration must be a positive integer"
+                    )
 
         if "value_sampling" in self.config:
             sampling = self.config["value_sampling"]
             if not isinstance(sampling, dict):
-                raise TypeError("'value_sampling' must be a dictionary")
+                raise TypeError(
+                    f"'value_sampling' in {self.config['name']} configuration must be a dictionary"
+                )
 
             if "enabled" not in sampling:
                 raise ValueError(
-                    "'enabled' is required in 'value_sampling' configuration"
+                    f"'enabled' is required in {self.config['name']} 'value_sampling' configuration"
                 )
             if not isinstance(sampling["enabled"], bool):
-                raise TypeError("'enabled' in 'value_sampling' must be a boolean")
+                raise TypeError(
+                    f"'enabled' in {self.config['name']} 'value_sampling' configuration must be a boolean"
+                )
 
             if sampling["enabled"]:
                 if "sample_size" not in sampling:
                     raise ValueError(
-                        "'sample_size' is required when value_sampling is enabled"
+                        f"'sample_size' is required when value_sampling is enabled in {self.config['name']}"
                     )
                 if (
                     not isinstance(sampling["sample_size"], int)
                     or sampling["sample_size"] <= 0
                 ):
-                    raise ValueError("'sample_size' must be a positive integer")
+                    raise ValueError(
+                        f"'sample_size' in {self.config['name']} configuration must be a positive integer"
+                    )
 
                 if "method" not in sampling:
                     raise ValueError(
-                        "'method' is required when value_sampling is enabled"
+                        f"'method' is required when value_sampling is enabled in {self.config['name']}"
                     )
                 if sampling["method"] not in [
                     "random",
@@ -222,17 +245,17 @@ class ReduceOperation(BaseOperation):
                     "sem_sim",
                 ]:
                     raise ValueError(
-                        "Invalid 'method'. Must be 'random', 'first_n', or 'embedding'"
+                        f"Invalid 'method'. Must be 'random', 'first_n', or 'embedding' in {self.config['name']}"
                     )
 
                 if sampling["method"] == "embedding":
                     if "embedding_model" not in sampling:
                         raise ValueError(
-                            "'embedding_model' is required when using embedding-based sampling"
+                            f"'embedding_model' is required when using embedding-based sampling in {self.config['name']}"
                         )
                     if "embedding_keys" not in sampling:
                         raise ValueError(
-                            "'embedding_keys' is required when using embedding-based sampling"
+                            f"'embedding_keys' is required when using embedding-based sampling in {self.config['name']}"
                         )
 
         self.gleaning_check()
@@ -250,6 +273,11 @@ class ReduceOperation(BaseOperation):
         Returns:
             Tuple[List[Dict], float]: A tuple containing the processed results and the total cost of the operation.
         """
+        if self.config.get("gleaning", {}).get("validation_prompt", None):
+            self.console.log(
+                f"Using gleaning with validation prompt: {self.config.get('gleaning', {}).get('validation_prompt', '')}"
+            )
+
         reduce_keys = self.config["reduce_key"]
         if isinstance(reduce_keys, str):
             reduce_keys = [reduce_keys]
@@ -375,7 +403,9 @@ class ReduceOperation(BaseOperation):
         if sample_size >= len(group_list):
             return group_list, 0
 
-        clusters, cost = cluster_documents(group_list, value_sampling, sample_size)
+        clusters, cost = cluster_documents(
+            group_list, value_sampling, sample_size, self.api
+        )
 
         sampled_items = []
         idx_added_already = set()
@@ -413,9 +443,11 @@ class ReduceOperation(BaseOperation):
             reduce_key=dict(zip(self.config["reduce_key"], key))
         )
 
-        embeddings, cost = get_embeddings_for_clustering(group_list, value_sampling)
+        embeddings, cost = get_embeddings_for_clustering(
+            group_list, value_sampling, self.api
+        )
 
-        query_response = gen_embedding(embedding_model, [query_text])
+        query_response = self.runner.api.gen_embedding(embedding_model, [query_text])
         query_embedding = query_response["data"][0]["embedding"]
         cost += completion_cost(query_response)
 
@@ -683,7 +715,7 @@ class ReduceOperation(BaseOperation):
             output=current_output,
             reduce_key=dict(zip(self.config["reduce_key"], key)),
         )
-        response = call_llm(
+        response = self.runner.api.call_llm(
             self.config.get("model", self.default_model),
             "reduce",
             [{"role": "user", "content": fold_prompt}],
@@ -693,7 +725,7 @@ class ReduceOperation(BaseOperation):
             timeout_seconds=self.config.get("timeout", 120),
             max_retries_per_timeout=self.config.get("max_retries_per_timeout", 2),
         )
-        folded_output = parse_llm_response(
+        folded_output = self.runner.api.parse_llm_response(
             response,
             self.config["output"]["schema"],
             manually_fix_errors=self.manually_fix_errors,
@@ -704,7 +736,7 @@ class ReduceOperation(BaseOperation):
         end_time = time.time()
         self._update_fold_time(end_time - start_time)
 
-        if validate_output(self.config, folded_output, self.console):
+        if self.runner.api.validate_output(self.config, folded_output, self.console):
             return folded_output, fold_cost
         return None, fold_cost
 
@@ -729,7 +761,7 @@ class ReduceOperation(BaseOperation):
         merge_prompt = merge_prompt_template.render(
             outputs=outputs, reduce_key=dict(zip(self.config["reduce_key"], key))
         )
-        response = call_llm(
+        response = self.runner.api.call_llm(
             self.config.get("model", self.default_model),
             "merge",
             [{"role": "user", "content": merge_prompt}],
@@ -738,13 +770,15 @@ class ReduceOperation(BaseOperation):
             timeout_seconds=self.config.get("timeout", 120),
             max_retries_per_timeout=self.config.get("max_retries_per_timeout", 2),
         )
-        merged_output = parse_llm_response(response, self.config["output"]["schema"])[0]
+        merged_output = self.runner.api.parse_llm_response(
+            response, self.config["output"]["schema"]
+        )[0]
         merged_output.update(dict(zip(self.config["reduce_key"], key)))
         merge_cost = completion_cost(response)
         end_time = time.time()
         self._update_merge_time(end_time - start_time)
 
-        if validate_output(self.config, merged_output, self.console):
+        if self.runner.api.validate_output(self.config, merged_output, self.console):
             return merged_output, merge_cost
         return None, merge_cost
 
@@ -821,7 +855,7 @@ class ReduceOperation(BaseOperation):
         item_cost = 0
 
         if "gleaning" in self.config:
-            response, gleaning_cost = call_llm_with_gleaning(
+            response, gleaning_cost = self.runner.api.call_llm_with_gleaning(
                 self.config.get("model", self.default_model),
                 "reduce",
                 [{"role": "user", "content": prompt}],
@@ -831,10 +865,11 @@ class ReduceOperation(BaseOperation):
                 console=self.console,
                 timeout_seconds=self.config.get("timeout", 120),
                 max_retries_per_timeout=self.config.get("max_retries_per_timeout", 2),
+                verbose=self.config.get("verbose", False),
             )
             item_cost += gleaning_cost
         else:
-            response = call_llm(
+            response = self.runner.api.call_llm(
                 self.config.get("model", self.default_model),
                 "reduce",
                 [{"role": "user", "content": prompt}],
@@ -847,13 +882,13 @@ class ReduceOperation(BaseOperation):
 
         item_cost += completion_cost(response)
 
-        output = parse_llm_response(
+        output = self.runner.api.parse_llm_response(
             response,
             self.config["output"]["schema"],
             manually_fix_errors=self.manually_fix_errors,
         )[0]
         output.update(dict(zip(self.config["reduce_key"], key)))
 
-        if validate_output(self.config, output, self.console):
+        if self.runner.api.validate_output(self.config, output, self.console):
             return output, item_cost
         return None, item_cost

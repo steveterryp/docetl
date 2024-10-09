@@ -2,24 +2,8 @@ import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Dict, List, Optional, Union
 
-from docetl.parsing_tools import PARSING_TOOLS
+from docetl.parsing_tools import get_parser, get_parsing_tools
 from docetl.schemas import ParsingTool
-
-
-def process_item(
-    item: Dict[str, Any],
-    input_key: str,
-    output_key: str,
-    func: Callable,
-    **function_kwargs: Dict[str, Any],
-):
-    if input_key not in item:
-        raise ValueError(f"Input key {input_key} not found in item: {item}")
-    result = func(item[input_key], **function_kwargs)
-    if isinstance(result, list):
-        return [item.copy() | {output_key: res} for res in result]
-    else:
-        return [item | {output_key: result}]
 
 
 def create_parsing_tool_map(
@@ -34,8 +18,11 @@ def create_parsing_tool_map(
     Returns:
         Dict[str, ParsingTool]: A dictionary mapping tool names to ParsingTool objects.
     """
-    if parsing_tools is None:
+    if not parsing_tools:
         return {}
+
+    if not isinstance(parsing_tools[0], ParsingTool):
+        parsing_tools = [ParsingTool(**tool) for tool in parsing_tools]
 
     return {tool.name: tool for tool in parsing_tools}
 
@@ -54,6 +41,7 @@ class Dataset:
 
     def __init__(
         self,
+        runner,
         type: str,
         path_or_data: Union[str, List[Dict]],
         source: str = "local",
@@ -70,6 +58,7 @@ class Dataset:
             parsing (List[Dict[str, str]], optional): A list of parsing tools to apply to the data.
             user_defined_parsing_tool_map (Dict[str, ParsingTool], optional): A map of user-defined parsing tools.
         """
+        self.runner = runner
         self.type = self._validate_type(type)
         self.source = self._validate_source(source)
         self.path_or_data = self._validate_path_or_data(path_or_data)
@@ -159,20 +148,14 @@ class Dataset:
         for tool in parsing_tools:
             if (
                 not isinstance(tool, dict)
-                or "input_key" not in tool
                 or "function" not in tool
-                or "output_key" not in tool
             ):
                 raise ValueError(
-                    "Each parsing tool must be a dictionary with 'input_key', 'function', and 'output_key' keys"
+                    "Each parsing tool must be a dictionary with a 'function' key and any arguments required by that function"
                 )
-            if (
-                not isinstance(tool["input_key"], str)
-                or not isinstance(tool["function"], str)
-                or not isinstance(tool["output_key"], str)
-            ):
+            if not isinstance(tool["function"], str):
                 raise ValueError(
-                    "'input_key', 'function', and 'output_key' in parsing tools must be strings"
+                    "'function' in parsing tools must be a string"
                 )
             if "function_kwargs" in tool and not isinstance(
                 tool["function_kwargs"], dict
@@ -221,6 +204,15 @@ class Dataset:
 
         return self._apply_parsing_tools(data)
 
+    def _process_item(
+        self,
+        item: Dict[str, Any],
+        func: Callable,
+        **function_kwargs: Dict[str, Any],
+    ):
+        result = func(item, **function_kwargs)
+        return [item.copy() | res for res in result]
+        
     def _apply_parsing_tools(self, data: List[Dict]) -> List[Dict]:
         """
         Apply parsing tools to the data.
@@ -235,32 +227,40 @@ class Dataset:
             ValueError: If a parsing tool is not found or if an input key is missing from an item.
         """
         for tool in self.parsing:
-            input_key = tool["input_key"]
-            if tool["function"] in PARSING_TOOLS:
-                func = PARSING_TOOLS[tool["function"]]
-            elif (
-                self.user_defined_parsing_tool_map
-                and tool["function"] in self.user_defined_parsing_tool_map
-            ):
-                func = eval(
-                    self.user_defined_parsing_tool_map[tool["function"]].function_code
-                )
-            else:
-                raise ValueError(
-                    f"Parsing tool {tool['function']} not found. Please define it or use one of our existing parsing tools: {PARSING_TOOLS.keys()}"
-                )
+            function_kwargs = dict(tool)
+            function_kwargs.pop("function")
+            # FIXME: The following is just for backwards compatibility
+            # with the existing yaml format...
+            if "function_kwargs" in function_kwargs:
+                function_kwargs.update(function_kwargs.pop("function_kwargs"))
+            
+            try:
+                func = get_parser(tool["function"])
+            except KeyError:
+                if (
+                    self.user_defined_parsing_tool_map
+                    and tool["function"] in self.user_defined_parsing_tool_map
+                ):
+                    # Define the custom function in the current scope
+                    exec(
+                        self.user_defined_parsing_tool_map[
+                            tool["function"]
+                        ].function_code
+                    )
+                    # Get the function object
+                    func = locals()[tool["function"]]
+                else:
+                    raise ValueError(
+                        f"Parsing tool {tool['function']} not found. Please define it or use one of our existing parsing tools: {get_parsing_tools()}"
+                    )
 
-            output_key = tool["output_key"]
-            function_kwargs = tool.get("function_kwargs", {})
             new_data = []
 
             with ThreadPoolExecutor() as executor:
                 futures = [
                     executor.submit(
-                        process_item,
+                        self._process_item,
                         item,
-                        input_key,
-                        output_key,
                         func,
                         **function_kwargs,
                     )

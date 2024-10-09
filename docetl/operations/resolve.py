@@ -11,63 +11,58 @@ from jinja2 import Template
 from rich.prompt import Confirm
 
 from docetl.operations.base import BaseOperation
-from docetl.operations.utils import (
-    RichLoopBar,
-    call_llm,
-    gen_embedding,
-    parse_llm_response,
-    rich_as_completed,
-    validate_output,
-)
-from docetl.utils import completion_cost
-
-
-def compare_pair(
-    comparison_prompt: str,
-    model: str,
-    item1: Dict,
-    item2: Dict,
-    blocking_keys: List[str] = [],
-    timeout_seconds: int = 120,
-    max_retries_per_timeout: int = 2,
-) -> Tuple[bool, float]:
-    """
-    Compares two items using an LLM model to determine if they match.
-
-    Args:
-        comparison_prompt (str): The prompt template for comparison.
-        model (str): The LLM model to use for comparison.
-        item1 (Dict): The first item to compare.
-        item2 (Dict): The second item to compare.
-
-    Returns:
-        Tuple[bool, float]: A tuple containing a boolean indicating whether the items match and the cost of the comparison.
-    """
-    if blocking_keys:
-        if all(
-            key in item1 and key in item2 and item1[key].lower() == item2[key].lower()
-            for key in blocking_keys
-        ):
-            return True, 0
-
-    prompt_template = Template(comparison_prompt)
-    prompt = prompt_template.render(input1=item1, input2=item2)
-    response = call_llm(
-        model,
-        "compare",
-        [{"role": "user", "content": prompt}],
-        {"is_match": "bool"},
-        timeout_seconds=timeout_seconds,
-        max_retries_per_timeout=max_retries_per_timeout,
-    )
-    output = parse_llm_response(
-        response,
-        {"is_match": "bool"},
-    )[0]
-    return output["is_match"], completion_cost(response)
+from docetl.operations.utils import RichLoopBar, rich_as_completed
+from docetl.utils import completion_cost, extract_jinja_variables
 
 
 class ResolveOperation(BaseOperation):
+    def compare_pair(
+        self,
+        comparison_prompt: str,
+        model: str,
+        item1: Dict,
+        item2: Dict,
+        blocking_keys: List[str] = [],
+        timeout_seconds: int = 120,
+        max_retries_per_timeout: int = 2,
+    ) -> Tuple[bool, float]:
+        """
+        Compares two items using an LLM model to determine if they match.
+
+        Args:
+            comparison_prompt (str): The prompt template for comparison.
+            model (str): The LLM model to use for comparison.
+            item1 (Dict): The first item to compare.
+            item2 (Dict): The second item to compare.
+
+        Returns:
+            Tuple[bool, float]: A tuple containing a boolean indicating whether the items match and the cost of the comparison.
+        """
+        if blocking_keys:
+            if all(
+                key in item1
+                and key in item2
+                and item1[key].lower() == item2[key].lower()
+                for key in blocking_keys
+            ):
+                return True, 0
+
+        prompt_template = Template(comparison_prompt)
+        prompt = prompt_template.render(input1=item1, input2=item2)
+        response = self.runner.api.call_llm(
+            model,
+            "compare",
+            [{"role": "user", "content": prompt}],
+            {"is_match": "bool"},
+            timeout_seconds=timeout_seconds,
+            max_retries_per_timeout=max_retries_per_timeout,
+        )
+        output = self.runner.api.parse_llm_response(
+            response,
+            {"is_match": "bool"},
+        )[0]
+        return output["is_match"], completion_cost(response)
+
     def syntax_check(self) -> None:
         """
         Checks the configuration of the ResolveOperation for required keys and valid structure.
@@ -237,7 +232,9 @@ class ResolveOperation(BaseOperation):
                     " ".join(str(item[key]) for key in blocking_keys if key in item)
                     for item in items
                 ]
-                response = gen_embedding(model=embedding_model, input=texts)
+                response = self.runner.api.gen_embedding(
+                    model=embedding_model, input=texts
+                )
                 return [
                     (data["embedding"], completion_cost(response))
                     for data in response["data"]
@@ -357,7 +354,7 @@ class ResolveOperation(BaseOperation):
             with ThreadPoolExecutor(max_workers=self.max_threads) as executor:
                 future_to_pair = {
                     executor.submit(
-                        compare_pair,
+                        self.compare_pair,
                         self.config["comparison_prompt"],
                         self.config.get("comparison_model", self.default_model),
                         input_data[pair[0]],
@@ -399,7 +396,7 @@ class ResolveOperation(BaseOperation):
                     ]
 
                 resolution_prompt = reduction_template.render(inputs=cluster_items)
-                reduction_response = call_llm(
+                reduction_response = self.runner.api.call_llm(
                     self.config.get("resolution_model", self.default_model),
                     "reduce",
                     [{"role": "user", "content": resolution_prompt}],
@@ -410,14 +407,16 @@ class ResolveOperation(BaseOperation):
                         "max_retries_per_timeout", 2
                     ),
                 )
-                reduction_output = parse_llm_response(
+                reduction_output = self.runner.api.parse_llm_response(
                     reduction_response,
                     self.config["output"]["schema"],
                     manually_fix_errors=self.manually_fix_errors,
                 )[0]
                 reduction_cost = completion_cost(reduction_response)
 
-                if validate_output(self.config, reduction_output, self.console):
+                if self.runner.api.validate_output(
+                    self.config, reduction_output, self.console
+                ):
                     return (
                         [
                             {
@@ -433,7 +432,43 @@ class ResolveOperation(BaseOperation):
                     )
                 return [], reduction_cost
             else:
-                return [input_data[list(cluster)[0]]], 0
+                # Set the output schema to be the keys found in the compare_prompt
+                compare_prompt_keys = extract_jinja_variables(
+                    self.config["comparison_prompt"]
+                )
+                # Get the set of keys in the compare_prompt
+                compare_prompt_keys = set(
+                    [
+                        k.replace("input1.", "")
+                        for k in compare_prompt_keys
+                        if "input1" in k
+                    ]
+                )
+
+                # For each key in the output schema, find the most similar key in the compare_prompt
+                output_keys = set(self.config["output"]["schema"].keys())
+                key_mapping = {}
+                for output_key in output_keys:
+                    best_match = None
+                    best_score = 0
+                    for compare_key in compare_prompt_keys:
+                        score = sum(
+                            c1 == c2 for c1, c2 in zip(output_key, compare_key)
+                        ) / max(len(output_key), len(compare_key))
+                        if score > best_score:
+                            best_score = score
+                            best_match = compare_key
+                    key_mapping[output_key] = best_match
+
+                # Create the result dictionary using the key mapping
+                result = input_data[list(cluster)[0]].copy()
+                for output_key, compare_key in key_mapping.items():
+                    if compare_key in input_data[list(cluster)[0]]:
+                        result[output_key] = input_data[list(cluster)[0]][compare_key]
+                    else:
+                        result[output_key] = None  # or some default value
+
+                return [result], 0
 
         # Calculate the number of records before and clusters after
         num_records_before = len(input_data)

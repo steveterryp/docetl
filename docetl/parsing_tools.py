@@ -1,10 +1,49 @@
+import importlib
 import io
 import os
-from typing import List, Optional
+from typing import Dict, List, Optional, Any
 
-from litellm import transcription
+def with_input_output_key(fn):
+    """Decorator that wraps a parser function that takes a single
+    string parameter and return list of strings and makes it a full
+    parser function that takes an item as a dictionary and return a
+    list of dictionaries."""
+    def wrapper(item, input_key="text", output_key="text", **kw):
+        if input_key not in item:
+            raise ValueError(f"Input key {input_key} not found in item: {item}")
+        result = fn(item[input_key], **kw)
+        if not isinstance(result, list):
+            result = [result]
+        return [{output_key: res} for res in result]
+    return wrapper
+
+def llama_index_simple_directory_reader(item: dict[str, Any], input_key: str ="path") -> List[dict[str, Any]]:
+    from llama_index.core import SimpleDirectoryReader
+
+    documents = SimpleDirectoryReader(item[input_key]).load_data()
+    return [{"text": doc.text,
+             "metadata": doc.metadata}
+            for doc in documents]
 
 
+def llama_index_wikipedia_reader(item: dict[str, Any], input_key: str = "pages") -> List[dict[str, Any]]:
+    from llama_index.readers.wikipedia import WikipediaReader
+
+    loader = WikipediaReader()
+    pages = item[input_key]
+    if not isinstance(pages, list):
+        pages = [pages]
+    documents = loader.load_data(pages=pages, auto_suggest=False)
+    # The wikipedia reader does not include the page url in the metadata, which is impractical...
+    for name, doc in zip(pages, documents):
+        doc.metadata["source"] = "https://en.wikipedia.org/wiki/" + name
+
+    return [{"text": doc.text,
+             "metadata": doc.metadata}
+            for doc in documents]
+
+
+@with_input_output_key
 def whisper_speech_to_text(filename: str) -> List[str]:
     """
     Transcribe speech from an audio file to text using Whisper model via litellm.
@@ -17,6 +56,7 @@ def whisper_speech_to_text(filename: str) -> List[str]:
         List[str]: Transcribed text.
     """
     import os
+    from litellm import transcription
 
     file_size = os.path.getsize(filename)
     if file_size > 25 * 1024 * 1024:  # 25 MB in bytes
@@ -50,6 +90,7 @@ def whisper_speech_to_text(filename: str) -> List[str]:
         return [response.text]
 
 
+@with_input_output_key
 def xlsx_to_string(
     filename: str,
     orientation: str = "col",
@@ -106,6 +147,7 @@ def xlsx_to_string(
         return [process_sheet(wb.active)]
 
 
+@with_input_output_key
 def txt_to_string(filename: str) -> List[str]:
     """
     Read the content of a text file and return it as a list of strings (only one element).
@@ -120,6 +162,7 @@ def txt_to_string(filename: str) -> List[str]:
         return [file.read()]
 
 
+@with_input_output_key
 def docx_to_string(filename: str) -> List[str]:
     """
     Extract text from a Word document.
@@ -136,6 +179,7 @@ def docx_to_string(filename: str) -> List[str]:
     return ["\n".join([paragraph.text for paragraph in doc.paragraphs])]
 
 
+@with_input_output_key
 def pptx_to_string(filename: str, doc_per_slide: bool = False) -> List[str]:
     """
     Extract text from a PowerPoint presentation.
@@ -173,6 +217,7 @@ def pptx_to_string(filename: str, doc_per_slide: bool = False) -> List[str]:
     return result
 
 
+@with_input_output_key
 def azure_di_read(
     filename: str,
     use_url: bool = False,
@@ -312,12 +357,130 @@ def azure_di_read(
         ]
 
 
+@with_input_output_key
+def paddleocr_pdf_to_string(
+    input_path: str,
+    doc_per_page: bool = False,
+    ocr_enabled: bool = True,
+    lang: str = "en",
+) -> List[str]:
+    """
+    Extract text and image information from a PDF file using PaddleOCR for image-based PDFs.
+
+    **Note: this is very slow!!**
+
+    Args:
+        input_path (str): Path to the input PDF file.
+        doc_per_page (bool): If True, return a list of strings, one per page.
+            If False, return a single string.
+        ocr_enabled (bool): Whether to enable OCR for image-based PDFs.
+        lang (str): Language of the PDF file.
+
+    Returns:
+        List[str]: Extracted content as a list of formatted strings.
+    """
+    from paddleocr import PaddleOCR
+    import fitz
+    import numpy as np
+
+    ocr = PaddleOCR(use_angle_cls=True, lang=lang)
+
+    pdf_content = []
+
+    with fitz.open(input_path) as pdf:
+        for page_num in range(len(pdf)):
+            page = pdf[page_num]
+            text = page.get_text()
+            images = []
+
+            # Extract image information
+            for img_index, img in enumerate(page.get_images(full=True)):
+                rect = page.get_image_bbox(img)
+                images.append(f"Image {img_index + 1}: bbox {rect}")
+
+            page_content = f"Page {page_num + 1}:\n"
+            page_content += f"Text:\n{text}\n"
+            page_content += "Images:\n" + "\n".join(images) + "\n"
+
+            if not text and ocr_enabled:
+                mat = fitz.Matrix(2, 2)
+                pix = page.get_pixmap(matrix=mat)
+                img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
+                    pix.height, pix.width, 3
+                )
+
+                ocr_result = ocr.ocr(img, cls=True)
+                page_content += "OCR Results:\n"
+                for line in ocr_result[0]:
+                    bbox, (text, _) = line
+                    page_content += f"{bbox}, {text}\n"
+
+            pdf_content.append(page_content)
+
+    if not doc_per_page:
+        return ["\n\n".join(pdf_content)]
+
+    return pdf_content
+
+
+@with_input_output_key
+def gptpdf_to_string(
+    input_path: str,
+    gpt_model: str,
+    api_key: str,
+    base_url: str,
+    verbose: bool = False,
+    custom_prompt: Optional[Dict[str, str]] = None,
+) -> str:
+    """
+    Parse PDF using GPT to convert the content of a PDF to a markdown format and write it to an output file.
+
+    **Note: pip install gptpdf required**
+
+    Args:
+        input_path (str): Path to the input PDF file.
+        gpt_model (str): GPT model to be used for parsing.
+        api_key (str): API key for GPT service.
+        base_url (str): Base URL for the GPT service.
+        verbose (bool): If True, will print additional information during parsing.
+        custom_prompt (Optional[Dict[str, str]]): Custom prompt for the GPT model. See https://github.com/CosmosShadow/gptpdf for more information.
+
+    Returns:
+        str: Extracted content as a string.
+    """
+    from gptpdf import parse_pdf
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        kwargs = {
+            "pdf_path": input_path,
+            "output_dir": temp_dir,
+            "api_key": api_key,
+            "base_url": base_url,
+            "model": gpt_model,
+            "verbose": verbose,
+        }
+        if custom_prompt:
+            kwargs["prompt"] = custom_prompt
+
+        parsed_content, _ = parse_pdf(
+            **kwargs
+        )  # The second element is a list of image paths, which we don't need.
+
+        return [parsed_content]
+
+
 # Define a dictionary mapping function names to their corresponding functions
-PARSING_TOOLS = {
-    "whisper_speech_to_text": whisper_speech_to_text,
-    "xlsx_to_string": xlsx_to_string,
-    "txt_to_string": txt_to_string,
-    "docx_to_string": docx_to_string,
-    "pptx_to_string": pptx_to_string,
-    "azure_di_read": azure_di_read,
-}
+
+
+def get_parser(name: str):
+    try:
+        entrypoint = importlib.metadata.entry_points(group="docetl.parser")[name]
+    except KeyError as e:
+        raise KeyError(f"Unrecognized parser {name}")
+    return entrypoint.load()
+
+
+def get_parsing_tools():
+    return [ep.name for ep in importlib.metadata.entry_points(group="docetl.parser")]

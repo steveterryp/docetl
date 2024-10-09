@@ -9,15 +9,15 @@ from rich.console import Console
 from rich.prompt import Confirm
 from rich.status import Status
 
-from docetl.operations.equijoin import compare_pair as compare_pair_equijoin
-from docetl.operations.resolve import compare_pair as compare_pair_resolve
-from docetl.operations.utils import gen_embedding
+from docetl.operations.equijoin import EquijoinOperation
+from docetl.operations.resolve import ResolveOperation
 from docetl.utils import completion_cost, extract_jinja_variables
 
 
 class JoinOptimizer:
     def __init__(
         self,
+        runner,
         config: Dict[str, Any],
         op_config: Dict[str, Any],
         console: Console,
@@ -30,6 +30,7 @@ class JoinOptimizer:
         estimated_selectivity: float = None,
         status: Status = None,
     ):
+        self.runner = runner
         self.config = config
         self.op_config = op_config
         self.llm_client = llm_client
@@ -964,7 +965,7 @@ class JoinOptimizer:
             self.console.log(
                 f"[cyan]Processing batch {i//batch_size + 1} of {len(texts)//batch_size + 1}[/cyan]"
             )
-            response = gen_embedding(
+            response = self.runner.api.gen_embedding(
                 model=self.op_config.get("embedding_model", "text-embedding-3-small"),
                 input=batch,
             )
@@ -1076,10 +1077,17 @@ class JoinOptimizer:
         self, input_data: List[Dict[str, Any]], pairs: List[Tuple[int, int]]
     ) -> Tuple[List[Tuple[int, int, bool]], float]:
         comparisons, total_cost = [], 0
+        op = ResolveOperation(
+            self,
+            self.op_config,
+            self.runner.default_model,
+            self.max_threads,
+            self.console,
+            self.status)
         with ThreadPoolExecutor(max_workers=self.max_threads) as executor:
             futures = [
                 executor.submit(
-                    compare_pair_resolve,
+                    op.compare_pair,
                     self.op_config["comparison_prompt"],
                     self.op_config.get(
                         "comparison_model", self.config.get("model", "gpt-4o-mini")
@@ -1106,10 +1114,17 @@ class JoinOptimizer:
         pairs: List[Tuple[int, int]],
     ) -> Tuple[List[Tuple[int, int, bool]], float]:
         comparisons, total_cost = [], 0
+        op = EquijoinOperation(
+            self,
+            self.op_config,
+            self.runner.default_model,
+            self.max_threads,
+            self.console,
+            self.status)
         with ThreadPoolExecutor(max_workers=self.max_threads) as executor:
             futures = [
                 executor.submit(
-                    compare_pair_equijoin,
+                    op.compare_pair,
                     self.op_config["comparison_prompt"],
                     self.op_config.get(
                         "comparison_model", self.config.get("model", "gpt-4o-mini")
@@ -1294,7 +1309,7 @@ class JoinOptimizer:
                         "Here are up to 3 examples of incorrectly filtered pairs:\n"
                     )
                     for i, j in filtered_pairs[:3]:
-                        feedback += f"Item 1: {json.dumps({key: input_data[i][key] for key in blocking_keys})}\Item 2: {json.dumps({key: input_data[j][key] for key in blocking_keys})}\n"
+                        feedback += f"Item 1: {json.dumps({key: input_data[i][key] for key in blocking_keys})}\nItem 2: {json.dumps({key: input_data[j][key] for key in blocking_keys})}\n"
                         feedback += "These pairs are known matches but were filtered out by the rule.\n"
                     feedback += "Please generate a new rule that doesn't filter out these matches."
 

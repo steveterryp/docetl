@@ -37,6 +37,7 @@ class ReduceOptimizer:
 
     def __init__(
         self,
+        runner,
         config: Dict[str, Any],
         console: Console,
         llm_client: LLMClient,
@@ -58,6 +59,7 @@ class ReduceOptimizer:
             num_fold_prompts (int, optional): Number of fold prompts to generate. Defaults to 1.
             num_samples_in_validation (int, optional): Number of samples to use in validation. Defaults to 10.
         """
+        self.runner = runner
         self.config = config
         self.console = console
         self.llm_client = llm_client
@@ -1303,7 +1305,7 @@ class ReduceOptimizer:
         reduce_key = op_config["reduce_key"]
         input_schema = op_config.get("input", {}).get("schema", {})
         output_schema = op_config["output"]["schema"]
-        model = op_config.get("model", "gpt-4o")
+        model = op_config.get("model", "gpt-4o-mini")
 
         compression_ratios = {}
 
